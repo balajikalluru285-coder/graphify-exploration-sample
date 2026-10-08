@@ -1,0 +1,36 @@
+name: Build Graphify Knowledge Graph
+
+on:
+  push:                # runs automatically on every push, any branch
+  workflow_dispatch:   # also lets you run it manually from the Actions tab
+
+jobs:
+  build-graph:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Graphify
+        run: pip install graphifyy
+
+      - name: Extract the graph (code only, no API key needed)
+        run: graphify extract . --code-only --no-label
+
+      - name: Generate the report (GRAPH_REPORT.md)
+        run: graphify cluster-only . --no-label --no-viz
+
+      - name: Generate the interactive graph.html
+        run: graphify export html --graph graphify-out/graph.json
+
+      - name: Upload the graph as a downloadable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: graphify-output
+          path: graphify-out/
