@@ -1,0 +1,5 @@
+{
+  "application": "graphify-demo",
+  "environment": "dev",
+  "api_base": "/api"
+}
