@@ -1,0 +1,118 @@
+name: COBOL to C Experiment
+
+on:
+  workflow_dispatch:   # manual only: Actions tab -> this workflow -> Run workflow
+
+jobs:
+  cobol-to-c:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install GnuCOBOL and Graphify
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gnucobol || sudo apt-get install -y gnucobol3
+          cobc --version
+          pip install graphifyy
+
+      # Part 1: is the COBOL itself valid, and does it behave as expected?
+      - name: Compile and run the COBOL (behaviour check)
+        continue-on-error: true
+        run: |
+          mkdir -p out
+          cobc -m -o out/PAYMENT.so cobol-sample/payment.cob
+          cobc -x -o out/orderapp cobol-sample/orderprg.cob
+          COB_LIBRARY_PATH=out ./out/orderapp | tee out/run_output.txt
+
+      # Part 2: translate COBOL to C (translation only, no C compile)
+      - name: Translate COBOL to C (default CALL handling)
+        run: |
+          mkdir -p out/default
+          cobc -C -o out/default/orderprg.c cobol-sample/orderprg.cob
+          cobc -C -o out/default/payment.c cobol-sample/payment.cob
+          ls -la out/default
+
+      - name: Translate COBOL to C (static CALL variant)
+        continue-on-error: true
+        run: |
+          cobc --help | grep -i static || true
+          mkdir -p out/static
+          cobc -C -fstatic-call -o out/static/orderprg.c cobol-sample/orderprg.cob
+          cobc -C -fstatic-call -o out/static/payment.c cobol-sample/payment.cob
+          ls -la out/static
+
+      # Part 3: peek at how PERFORM and CALL were translated
+      - name: Peek at the generated C
+        continue-on-error: true
+        run: |
+          echo "=== Lines mentioning PAYMENT (default variant) ==="
+          grep -n -i "payment" out/default/orderprg.c | head -30 || true
+          echo "=== goto / label lines (default variant) ==="
+          grep -n "goto\|^ *l_[0-9]*:" out/default/orderprg.c | head -40 || true
+
+      # Part 4: run Graphify on the generated C
+      - name: Run Graphify on the generated C
+        run: |
+          for v in default static; do
+            if ls out/$v/*.c >/dev/null 2>&1; then
+              (cd out/$v && graphify extract . --code-only --no-label \
+                && graphify cluster-only . --no-label --no-viz \
+                && graphify export html --graph graphify-out/graph.json)
+            fi
+          done
+
+      # Part 5: print a short summary on the run page
+      - name: Summarize what Graphify found
+        shell: python
+        run: |
+          import json, os
+          from pathlib import Path
+
+          lines = []
+          for variant in ["default", "static"]:
+              p = Path("out") / variant / "graphify-out" / "graph.json"
+              if not p.exists():
+                  lines.append(f"### Variant: {variant} (no graph produced)")
+                  lines.append("")
+                  continue
+              g = json.loads(p.read_text(encoding="utf-8"))
+              nodes = g.get("nodes", [])
+              links = g.get("links", g.get("edges", []))
+              label = {n["id"]: n.get("label", n["id"]) for n in nodes}
+              relations = {}
+              for l in links:
+                  r = l.get("relation", "?")
+                  relations[r] = relations.get(r, 0) + 1
+              runtime = sum(
+                  1 for l in links
+                  if label.get(l["target"], "").lstrip(".").startswith("cob_")
+              )
+              lines.append(f"### Variant: {variant}")
+              lines.append(f"- nodes: {len(nodes)}, edges: {len(links)}")
+              lines.append(f"- edge relations: {relations}")
+              lines.append(f"- edges pointing at cob_* runtime functions: {runtime}")
+              lines.append("- node labels: " + ", ".join(sorted(set(label.values()))[:80]))
+              lines.append("- call edges (first 100):")
+              calls = [l for l in links if l.get("relation") == "calls"]
+              for l in calls[:100]:
+                  lines.append(f"  - {label.get(l['source'], l['source'])} -> {label.get(l['target'], l['target'])}")
+              lines.append("")
+
+          text = "\n".join(lines)
+          print(text)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
+              f.write(text + "\n")
+
+      - name: Upload everything for download
+        uses: actions/upload-artifact@v4
+        with:
+          name: cobol-experiment
+          path: out/
