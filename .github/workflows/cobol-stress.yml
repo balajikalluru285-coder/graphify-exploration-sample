@@ -1,0 +1,95 @@
+name: COBOL Stress Test
+
+on:
+  workflow_dispatch:   # manual only
+
+jobs:
+  stress:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install GnuCOBOL
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gnucobol || sudo apt-get install -y gnucobol3
+          cobc --version
+
+      # Translate every file separately. A failure is recorded, not fatal.
+      - name: Translate each COBOL file to C
+        run: |
+          mkdir -p out/stress
+          : > out/stress/translation_report.txt
+          ok=0
+          fail=0
+          for f in cobol-stress/*.cob; do
+            name=$(basename "$f" .cob)
+            if cobc -C -I cobol-stress -o "out/stress/$name.c" "$f" 2> "out/stress/$name.err"; then
+              echo "OK      $f" >> out/stress/translation_report.txt
+              ok=$((ok+1))
+            else
+              echo "FAILED  $f" >> out/stress/translation_report.txt
+              fail=$((fail+1))
+            fi
+          done
+          echo "translated: $ok   failed: $fail" | tee -a out/stress/translation_report.txt
+
+      - name: Rebuild the COBOL-level graph from the generated C
+        continue-on-error: true
+        run: |
+          python cobc_c_to_graph.py out/stress -o out/stress/cobol_graph.json | tee out/stress/miner_output.txt
+
+      # Shows exactly how cobc wrote the awkward statements, so the script can be fixed from facts
+      - name: Show how cobc commented PERFORM, GO TO, CALL and paragraphs
+        continue-on-error: true
+        run: |
+          grep -h "/\* PERFORM" out/stress/*.c | sed 's/  */ /g' | sort | uniq -c | tee out/stress/perform_comments.txt || true
+          grep -h "Line:.*: \(PERFORM\|GO TO\|CALL\|Paragraph\|Section\|Entry\)" out/stress/*.c | sed 's/  */ /g' | head -80 | tee out/stress/line_comments.txt || true
+          grep -h "cob_resolve_cobol" out/stress/*.c | sed 's/  */ /g' | tee out/stress/resolve_lines.txt || true
+
+      - name: Put the results on the run page
+        run: |
+          {
+            echo "### Translation report"
+            echo '```'
+            cat out/stress/translation_report.txt
+            echo '```'
+            echo "### Error messages from failed files (first 15 lines each)"
+            for e in out/stress/*.err; do
+              if [ -s "$e" ]; then
+                echo "**$e**"
+                echo '```'
+                head -15 "$e"
+                echo '```'
+              fi
+            done
+            echo "### What the script recovered"
+            echo '```'
+            cat out/stress/miner_output.txt 2>/dev/null || echo "no output"
+            echo '```'
+            echo "### How cobc commented PERFORM statements (count, text)"
+            echo '```'
+            cat out/stress/perform_comments.txt 2>/dev/null || true
+            echo '```'
+            echo "### Line comments for PERFORM / GO TO / CALL / Paragraph / Entry"
+            echo '```'
+            cat out/stress/line_comments.txt 2>/dev/null || true
+            echo '```'
+            echo "### cob_resolve_cobol lines (how CALL targets were written)"
+            echo '```'
+            cat out/stress/resolve_lines.txt 2>/dev/null || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload everything for download
+        uses: actions/upload-artifact@v4
+        with:
+          name: cobol-stress
+          path: out/stress/
